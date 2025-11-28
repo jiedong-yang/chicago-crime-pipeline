@@ -1,0 +1,9 @@
+pandas
+sodapy         # wrapper for Socrata API (Chicago Data)
+dvc            # Data Version Control
+mlflow         # needed to log experiments
+scikit-learn
+pyarrow        # needed for parquet files
+fastapi
+uvicorn
+requests
