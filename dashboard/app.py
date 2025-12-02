@@ -121,13 +121,20 @@ selected_area_id = [k for k, v in COMMUNITY_AREAS.items() if v == selected_area_
 if st.button(f"Analyze {selected_area_name}"):
     with st.spinner("Fetching historical data and running live inference..."):
         
-        # A. History
+        # 1. Define Key Dates
+        last_real_date = datetime.strptime(last_data_date_str, "%Y-%m-%d")
+        today_date = datetime.now()
+        
+        # A. History Start: 14 days before the data cuts off
+        start_plot_date = last_real_date - timedelta(days=14)
+        
+        # B. Forecast End: 7 days after TODAY (Bridging the gap + future)
+        end_plot_date = today_date + timedelta(days=7)
+        
+        # 2. Fetch Data
         history_df = fetch_history(selected_area_id)
         
-        # B. Predictions (Past + Future)
-        last_date_obj = datetime.strptime(last_data_date_str, "%Y-%m-%d")
-        start_plot_date = last_date_obj - timedelta(days=14)
-        end_plot_date = last_date_obj + timedelta(days=7)
+        # 3. Generate Predictions for the WHOLE range (History + Gap + Future)
         date_range = pd.date_range(start=start_plot_date, end=end_plot_date)
         
         prediction_results = []
@@ -143,43 +150,88 @@ if st.button(f"Analyze {selected_area_name}"):
             
         pred_df = pd.DataFrame(prediction_results)
         
+        # 4. Merge and Visualize
         if not history_df.empty and not pred_df.empty:
+            
+            # Convert to Datetime
             history_df['date'] = pd.to_datetime(history_df['date'])
             pred_df['date'] = pd.to_datetime(pred_df['date'])
             
-            # --- THE FIX: Convert Timestamp to Numeric (Milliseconds) ---
-            # Plotly needs numbers to perform the 'sum' operation internally for annotations
-            vline_numeric = pd.to_datetime(last_data_date_str).timestamp() * 1000
-            
+            # Numeric conversion for Plotly lines (Fixes the TypeError)
+            vline_data_end = pd.to_datetime(last_data_date_str).timestamp() * 1000
+            vline_today = pd.to_datetime(today_date.date()).timestamp() * 1000
+
             fig = go.Figure()
             
-            # Trace 1: Actual
+            # Trace 1: Actual History (Solid Blue)
             fig.add_trace(go.Scatter(
-                x=history_df['date'], y=history_df['actual_crimes'],
-                mode='lines+markers', name='Actual Crimes',
+                x=history_df['date'], 
+                y=history_df['actual_crimes'],
+                mode='lines+markers',
+                name='Actual History',
                 line=dict(color='royalblue', width=3)
             ))
             
-            # Trace 2: Predicted
+            # Trace 2: Model Predictions (Dashed Red)
             fig.add_trace(go.Scatter(
-                x=pred_df['date'], y=pred_df['predicted'],
-                mode='lines', name='Model Prediction',
+                x=pred_df['date'], 
+                y=pred_df['predicted'],
+                mode='lines',
+                name='Model Forecast',
                 line=dict(color='firebrick', width=2, dash='dash')
             ))
             
-            # Vertical Line
+            # Marker 1: End of Real Data
             fig.add_vline(
-                x=vline_numeric,  # <--- Passing number instead of Timestamp
-                line_width=1, line_dash="dot",
-                annotation_text="End of Training Data"
+                x=vline_data_end, 
+                line_width=1, 
+                line_dash="dot",
+                line_color="gray",
+                annotation_text="Data Cutoff (Lag)"
+            )
+            
+            # Marker 2: Today
+            fig.add_vline(
+                x=vline_today, 
+                line_width=2, 
+                line_color="green",
+                annotation_text="TODAY",
+                annotation_position="top right"
             )
             
             fig.update_layout(
-                title=f"Actual vs. Predicted Crime in {selected_area_name}",
-                xaxis_title="Date", yaxis_title="Crime Count",
-                hovermode="x unified"
+                title=f"Forecast Analysis: {selected_area_name}",
+                xaxis_title="Date",
+                yaxis_title="Crime Count",
+                hovermode="x unified",
+                legend=dict(
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=0.01
+                )
             )
             
             st.plotly_chart(fig, use_container_width=True)
+            
+            # Metrics
+            col1, col2, col3 = st.columns(3)
+            
+            # Avg Actual (History)
+            avg_actual = history_df['actual_crimes'].mean()
+            col1.metric("Avg Actual (Past 2 Weeks)", f"{avg_actual:.1f}")
+            
+            # Avg Prediction (Future 7 Days)
+            future_pred = pred_df[pred_df['date'] > pd.to_datetime(today_date)]['predicted'].mean()
+            col2.metric("Avg Forecast (Next 7 Days)", f"{future_pred:.1f}")
+            
+            # Gap Analysis
+            gap_pred = pred_df[
+                (pred_df['date'] > pd.to_datetime(last_data_date_str)) & 
+                (pred_df['date'] <= pd.to_datetime(today_date))
+            ]['predicted'].mean()
+            
+            col3.metric("Avg 'Blind Spot' (The Lag)", f"{gap_pred:.1f}", help="Predicted crime for the days where we don't have data yet.")
+
         else:
-            st.error("Insufficient data to generate plot.")
+            st.error("Insufficient data to generate plot. Check API connection.")
