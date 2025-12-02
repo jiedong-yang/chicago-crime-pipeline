@@ -15,4 +15,3 @@ streamlit==1.51.0
 uvicorn==0.38.0
 cryptography==41.0.7
 cffi==1.17.1
-fsspec==2023.12.2
