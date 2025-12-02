@@ -1,10 +1,12 @@
 import pandas as pd
 import numpy as np
 from prophet import Prophet
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import mlflow
 import mlflow.pyfunc
 from mlflow.tracking import MlflowClient
+import mlflow.data
+from mlflow.data.pandas_dataset import PandasDataset
 import argparse
 import os
 import joblib
@@ -12,70 +14,33 @@ import joblib
 # Configuration
 remote_server_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5001")
 mlflow.set_tracking_uri(remote_server_uri)
-
-# Set Matplotlib config to tmp to avoid permission errors in Docker
 os.environ['MPLCONFIGDIR'] = '/tmp'
 
-# ---------------------------------------------------------
-# 1. Define the Custom MLflow Model Wrapper
-# ---------------------------------------------------------
+# --- Custom Model Wrapper (Same as before) ---
 class ChicagoProphetModel(mlflow.pyfunc.PythonModel):
-    """
-    A custom MLflow model that holds a dictionary of Prophet models.
-    One model per Community Area.
-    """
     def load_context(self, context):
-        # Load the dictionary of models from the artifact path
         self.models = joblib.load(context.artifacts["prophet_models"])
 
     def predict(self, context, model_input):
-        """
-        Input schema: DataFrame with columns ['community_area', 'date']
-        """
         predictions = []
-        
-        # We loop through the input rows (usually just 1 for API)
         for _, row in model_input.iterrows():
             area = int(row['community_area'])
             date = pd.to_datetime(row['date'])
-            
-            # 1. Select the correct model
             model = self.models.get(area)
-            
             if model is None:
-                # Fallback if area unknown
                 predictions.append(0.0)
                 continue
-                
-            # 2. Create Future DataFrame for Prophet
             future = pd.DataFrame({'ds': [date]})
-            
-            # 3. Forecast
             forecast = model.predict(future)
-            pred_value = forecast['yhat'].values[0]
-            
-            # Prophet can output negative numbers, clamp to 0
-            predictions.append(max(0.0, pred_value))
-            
+            predictions.append(max(0.0, forecast['yhat'].values[0]))
         return predictions
 
-# ---------------------------------------------------------
-# 2. Training Logic
-# ---------------------------------------------------------
 def load_and_prep_data(path):
     df = pd.read_parquet(path)
     df['date'] = pd.to_datetime(df['date'])
-    
-    # FIX: Explicitly create a column for daily grouping to avoid Naming confusion
     df['date_day'] = df['date'].dt.date
-    
-    # Aggregate to Daily Counts
-    # resulting columns: ['date_day', 'community_area', 'y']
     daily = df.groupby(['date_day', 'community_area']).size().reset_index(name='y')
-    
-    # Rename 'date_day' to 'ds' for Prophet
     daily.rename(columns={'date_day': 'ds'}, inplace=True)
-    
     daily['ds'] = pd.to_datetime(daily['ds'])
     return daily
 
@@ -83,48 +48,102 @@ def train_prophet_models(data_path):
     print(f"Loading data from {data_path}...")
     df = load_and_prep_data(data_path)
     
-    # Dictionary to store our 77 models
-    # { 1: ProphetModel, 2: ProphetModel ... }
+    # --- 1. DRIFT STRATEGY: Time-Series Split ---
+    # We hide the last 7 days from the model to see if it can predict them accurately.
+    cutoff_date = df['ds'].max() - pd.Timedelta(days=7)
+    
+    print(f"Training Data: Up to {cutoff_date}")
+    print(f"Validation Data: After {cutoff_date} (The 'Holdout' set)")
+    
+    train_df = df[df['ds'] <= cutoff_date]
+    valid_df = df[df['ds'] > cutoff_date]
+    
+    # Models Dictionary
     area_models = {}
     
-    # Get list of all areas
+    # Validation Metrics Storage
+    all_y_true = []
+    all_y_pred = []
+    
     areas = df['community_area'].unique()
     print(f"Training Prophet models for {len(areas)} areas...")
     
     for area in areas:
-        # 1. Filter Data for this Area
-        area_df = df[df['community_area'] == area].copy()
+        # Train on Training Set ONLY
+        area_train = train_df[train_df['community_area'] == area].copy()
         
-        # 2. Train Prophet
-        # Using daily seasonality. 
-        m = Prophet(daily_seasonality=True, yearly_seasonality=True)
-        m.fit(area_df)
+        # Prophet Parameters (We will log these)
+        params = {
+            "daily_seasonality": True,
+            "yearly_seasonality": True,
+            "changepoint_prior_scale": 0.05 # Default, but good to be explicit
+        }
         
+        m = Prophet(**params)
+        m.fit(area_train)
+        
+        # Store model
         area_models[int(area)] = m
+        
+        # --- Evaluate on Validation Set ---
+        area_valid = valid_df[valid_df['community_area'] == area].copy()
+        if not area_valid.empty:
+            forecast = m.predict(area_valid[['ds']])
+            
+            # Collect actuals and predictions for global metric calculation
+            all_y_true.extend(area_valid['y'].values)
+            all_y_pred.extend(np.maximum(0, forecast['yhat'].values)) # Clamp to 0
+
+    print("Training and Evaluation complete.")
     
-    print("Training complete.")
+    # Calculate Global Metrics (Weighted average across the city)
+    # This single number tells us "How well is the system working?"
+    global_rmse = np.sqrt(mean_squared_error(all_y_true, all_y_pred))
+    global_mae = mean_absolute_error(all_y_true, all_y_pred)
+    global_r2 = r2_score(all_y_true, all_y_pred)
     
-    # ---------------------------------------------------------
-    # 3. Logging to MLflow
-    # ---------------------------------------------------------
+    print(f"Global Validation RMSE: {global_rmse:.4f}")
+    print(f"Global Validation MAE:  {global_mae:.4f}")
+
+    # --- 2. MLflow Logging ---
     experiment_name = "Chicago_Crime_Prophet"
     mlflow.set_experiment(experiment_name)
     
     with mlflow.start_run() as run:
-        # Save the dictionary of models to a local file first
+        
+        # A. Log Parameters (Configuration)
+        mlflow.log_params({
+            "model_type": "Prophet",
+            "n_areas": len(areas),
+            "validation_days": 7,
+            "seasonality_mode": "additive",
+            "changepoint_prior_scale": 0.05
+        })
+        
+        # B. Log Metrics (Performance)
+        mlflow.log_metrics({
+            "rmse": global_rmse,
+            "mae": global_mae,
+            "r2_score": global_r2
+        })
+        
+        # C. Log Dataset (Lineage)
+        # MLflow 2.0+ allows logging dataset info
+        dataset = PandasDataset(df, name="chicago_crime_aggregated", targets="y")
+        mlflow.log_input(dataset, context="training")
+        
+        # D. Save & Log Model
         model_dict_path = "prophet_models.pkl"
         joblib.dump(area_models, model_dict_path)
         
-        # Log the Custom Model
         mlflow.pyfunc.log_model(
             artifact_path="model",
             python_model=ChicagoProphetModel(),
             artifacts={"prophet_models": model_dict_path},
             registered_model_name="ChicagoCrimePredictor"
         )
-        print("Mega-Model logged and registered.")
         
-        # Transition to Production
+        # E. Transition to Production
         client = MlflowClient()
         latest_version = client.get_latest_versions("ChicagoCrimePredictor", stages=["None"])[0].version
         client.transition_model_version_stage(
@@ -133,17 +152,14 @@ def train_prophet_models(data_path):
             stage="Production",
             archive_existing_versions=True
         )
-        print("Promoted to Production.")
         
-        # Cleanup local file
         if os.path.exists(model_dict_path):
             os.remove(model_dict_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default="data/raw/crimes.parquet")
-    parser.add_argument("--n_estimators", type=int, default=100) 
-    parser.add_argument("--max_depth", type=int, default=10)
     args = parser.parse_args()
     
+    # Note: We removed the unused args (n_estimators) to clean up
     train_prophet_models(args.data)
