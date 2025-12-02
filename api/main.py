@@ -46,7 +46,7 @@ app = FastAPI(lifespan=lifespan)
 class CrimeInput(BaseModel):
     community_area: int
     date: str
-    prev_day_count: float
+    # prev_day_count: float
 
 # ---------------------------------------------------------
 # NEW: REFRESH ENDPOINT
@@ -86,21 +86,25 @@ def predict(input_data: CrimeInput):
     if "crime_model" not in ml_models or ml_models["crime_model"] is None:
         return {"error": "Model not loaded"}
 
-    dt = pd.to_datetime(input_data.date)
-    features = pd.DataFrame({
+    # Prepare input for the Custom PyFunc Model
+    # It expects a DataFrame with columns ['community_area', 'date']
+    input_df = pd.DataFrame({
         'community_area': [input_data.community_area],
-        'day_of_week': [dt.dayofweek],
-        'month': [dt.month],
-        'day_of_year': [dt.dayofyear],
-        'prev_day_count': [input_data.prev_day_count]
+        'date': [input_data.date]
     })
-    prediction = ml_models["crime_model"].predict(features)
     
-    return {
-        "predicted_crime_count": float(prediction[0]),
-        "input_date": input_data.date,
-        "community_area": input_data.community_area
-    }
+    try:
+        # The .predict() method of our custom class returns a list
+        prediction_list = ml_models["crime_model"].predict(input_df)
+        prediction_value = prediction_list[0]
+        
+        return {
+            "predicted_crime_count": float(prediction_value),
+            "input_date": input_data.date,
+            "community_area": input_data.community_area
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
