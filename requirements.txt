@@ -2,7 +2,7 @@ awscli==1.43.5
 boto3==1.41.5
 dvc==3.64.0
 fastapi==0.122.0
-mlflow==3.6.0
+mlflow==2.7.1
 pandas
 plotly==6.5.0
 pyarrow==21.0.0
