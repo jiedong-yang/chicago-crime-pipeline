@@ -101,7 +101,7 @@ services:
     volumes:
       - ./mlruns:/mlflow
       - ~/.aws:/root/.aws:ro
-    command: mlflow server --backend-store-uri sqlite:////mlflow/mlflow.db --default-artifact-root s3://chicago-crime-pipeline/mlflow-artifacts/ --host 0.0.0.0
+    command: mlflow server --backend-store-uri sqlite:////mlflow/mlflow.db --default-artifact-root s3://chicago-crime-pipeline/mlflow-artifacts/ --host 0.0.0.0 --serve-artifacts
   
   api:
     build: .
