@@ -86,7 +86,9 @@ services:
       - .:/sources
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.7.1
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
     ports:
       - "5001:5000"
     environment:
