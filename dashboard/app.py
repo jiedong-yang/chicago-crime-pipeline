@@ -9,7 +9,7 @@ import json
 
 # --- Configuration ---
 # 1. API URL (Use localhost for testing, EC2 IP for production)
-API_URL = "http://localhost:8000" 
+API_URL = "http://3.137.142.2:8000" 
 
 # 2. Local Map File
 GEOJSON_PATH = "data/chicago_map.geojson"
