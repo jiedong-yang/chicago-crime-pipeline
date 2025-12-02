@@ -11,11 +11,13 @@ from contextlib import asynccontextmanager
 # ---------------------------------------------------------
 # 1. Point to the MLflow Server (CRITICAL FIX)
 # This tells the script to ask the Docker container for the model location
-mlflow.set_tracking_uri("http://localhost:5001")
+MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5001")
+mlflow.set_tracking_uri(MLFLOW_URI)
 
 # 2. Paste your Run ID Here
-RUN_ID = "096c6e39e383464f91673828813978f2"  # <--- Make sure this matches the ID from MLflow UI
-LOGGED_MODEL = f"runs:/{RUN_ID}/model"
+MODEL_NAME = "ChicagoCrimePredictor"
+STAGE = "Production"  # <--- Make sure this matches the ID from MLflow UI
+LOGGED_MODEL = f"models:/{MODEL_NAME}/{STAGE}"
 
 # Global model variable
 ml_models = {}
