@@ -28,7 +28,7 @@ with DAG(
     # We mount ./scripts to /opt/airflow/scripts and ./data to /opt/airflow/data
     ingest_task = BashOperator(
         task_id='ingest_data',
-        bash_command='python /opt/airflow/scripts/ingest.py --days 7 --output /opt/airflow/data/raw/crimes.parquet'
+        bash_command='python /opt/airflow/scripts/ingest.py --days 37 --output /opt/airflow/data/raw/crimes.parquet'
     )
 
     # Task 2: DVC Versioning (Optional but recommended)
