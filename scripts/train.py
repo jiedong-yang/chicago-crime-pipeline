@@ -128,8 +128,8 @@ def train_prophet_models(data_path):
         })
         
         # C. Log Dataset (Lineage)
-        # MLflow 2.0+ allows logging dataset info
-        dataset = PandasDataset(df, name="chicago_crime_aggregated", targets="y")
+        # Use from_pandas() helper to avoid manual source creation
+        dataset = mlflow.data.from_pandas(df, name="chicago_crime_aggregated", targets="y")
         mlflow.log_input(dataset, context="training")
         
         # D. Save & Log Model
