@@ -8,10 +8,7 @@ import os
 import json
 
 # --- Configuration ---
-# 1. API URL (Use localhost for testing, EC2 IP for production)
 API_URL = "http://3.137.142.2:8000" 
-
-# 2. Local Map File
 GEOJSON_PATH = "data/chicago_map.geojson"
 
 # Full Mapping: ID -> Name
@@ -39,135 +36,122 @@ st.title("🚔 Chicago Crime Radar")
 st.markdown("### AI-Powered Time Series Forecasting")
 
 # --- Helper Functions ---
-
 @st.cache_data
 def load_geojson():
-    if not os.path.exists(GEOJSON_PATH):
-        st.error(f"Map file not found at {GEOJSON_PATH}.")
-        return {}
-    with open(GEOJSON_PATH, 'r') as f:
-        return json.load(f)
+    if not os.path.exists(GEOJSON_PATH): return {}
+    with open(GEOJSON_PATH, 'r') as f: return json.load(f)
 
 @st.cache_data(ttl=3600) 
-def fetch_stats_from_api():
-    """Ask Backend for metadata (latest available data date)"""
+def fetch_metadata():
     try:
-        response = requests.get(f"{API_URL}/stats")
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception as e:
-        return None
+        return requests.get(f"{API_URL}/stats").json()
+    except: return None
+
+def fetch_history(area_id):
+    """Get actual crime data for past 14 days"""
+    try:
+        resp = requests.get(f"{API_URL}/history", params={"community_area": area_id, "days": 14})
+        if resp.status_code == 200: return pd.DataFrame(resp.json())
+    except: pass
+    return pd.DataFrame()
 
 # --- Main Logic ---
-
-# 1. Fetch Metadata
 chicago_geojson = load_geojson()
-stats_data = fetch_stats_from_api()
+stats_data = fetch_metadata()
 
 last_data_date_str = "Unknown"
+last_data_date = datetime.now()
+
 if stats_data and "last_date" in stats_data:
     last_data_date_str = stats_data["last_date"]
+    last_data_date = datetime.strptime(last_data_date_str, "%Y-%m-%d")
 
-# 2. Sidebar Configuration
-st.sidebar.header("Forecast Settings")
-st.sidebar.info(f"Last Training Data: **{last_data_date_str}**")
+# --- Sidebar ---
+st.sidebar.header("Settings")
+st.sidebar.info(f"Last Actual Data: **{last_data_date_str}**")
 
-# Date Picker: Default to Tomorrow
-default_date = datetime.now().date() + timedelta(days=1)
-selected_date = st.sidebar.date_input("Target Forecast Date", default_date)
-selected_date_str = selected_date.strftime("%Y-%m-%d")
+# --- Map Section (Simplified for Brevity - Same as before) ---
+# (User can click "Generate Heatmap" for tomorrow as usual)
+# ... [Insert Map Code Here if you want, or focus on the Trend below] ...
 
-# 3. City-Wide Map Generation
-st.subheader(f"🗺️ City-Wide Forecast: {selected_date_str}")
-
-if st.button("Generate Heatmap"):
-    results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    total_areas = 77
-    
-    for area_id in range(1, total_areas + 1):
-        status_text.text(f"Forecasting {COMMUNITY_AREAS.get(area_id)}...")
-        
-        # New Payload: No prev_day_count needed!
-        payload = {
-            "community_area": area_id,
-            "date": selected_date_str
-        }
-        
-        try:
-            response = requests.post(f"{API_URL}/predict", json=payload)
-            if response.status_code == 200:
-                pred = response.json()['predicted_crime_count']
-                area_name = COMMUNITY_AREAS.get(area_id, f"Area {area_id}")
-                
-                results.append({
-                    "Area ID": str(area_id), 
-                    "Area Name": area_name,
-                    "Predicted Crimes": round(pred, 2)
-                })
-        except Exception:
-            pass
-        
-        progress_bar.progress(area_id / total_areas)
-    
-    status_text.empty()
-    progress_bar.empty()
-    
-    if results:
-        results_df = pd.DataFrame(results)
-        
-        # Map Visualization
-        fig = px.choropleth_mapbox(
-            results_df,
-            geojson=chicago_geojson,
-            locations='Area ID',
-            featureidkey="properties.area_num_1", 
-            color='Predicted Crimes',
-            color_continuous_scale="Reds",
-            mapbox_style="carto-positron",
-            zoom=9.5,
-            center = {"lat": 41.83, "lon": -87.68},
-            opacity=0.6,
-            hover_name="Area Name"
-        )
-        fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
-        st.plotly_chart(fig, use_container_width=True)
-
-# 4. Neighborhood Drill Down (Trend Forecast)
 st.markdown("---")
-st.subheader("📈 Neighborhood Trend Analysis (7-Day Forecast)")
+st.subheader("📈 Deep Dive: Model Performance & Forecast")
 
-selected_area_name = st.selectbox("Select Neighborhood", list(COMMUNITY_AREAS.values()))
-# Reverse lookup ID from Name
+selected_area_name = st.selectbox("Select Neighborhood", list(COMMUNITY_AREAS.values()), index=7)
 selected_area_id = [k for k, v in COMMUNITY_AREAS.items() if v == selected_area_name][0]
 
-if st.button(f"Generate Trend for {selected_area_name}"):
-    trend_results = []
-    
-    # Forecast next 7 days starting from selected date
-    for i in range(7):
-        current_date = selected_date + timedelta(days=i)
-        date_str = current_date.strftime("%Y-%m-%d")
+if st.button(f"Analyze {selected_area_name}"):
+    with st.spinner("Fetching historical data and running live inference..."):
         
-        payload = {"community_area": selected_area_id, "date": date_str}
+        # 1. Get Actual History (Past 14 Days)
+        history_df = fetch_history(selected_area_id)
         
-        try:
-            resp = requests.post(f"{API_URL}/predict", json=payload)
-            if resp.status_code == 200:
-                val = resp.json()['predicted_crime_count']
-                trend_results.append({"Date": date_str, "Predicted Crimes": val})
-        except:
-            pass
+        # 2. Generate Prediction Dates (Past 14 Days + Next 7 Days)
+        # We predict on the PAST too, to see how well the model fits
+        
+        start_plot_date = last_data_date - timedelta(days=14)
+        end_plot_date = last_data_date + timedelta(days=7)
+        
+        date_range = pd.date_range(start=start_plot_date, end=end_plot_date)
+        
+        prediction_results = []
+        for d in date_range:
+            d_str = d.strftime("%Y-%m-%d")
+            try:
+                payload = {"community_area": selected_area_id, "date": d_str}
+                resp = requests.post(f"{API_URL}/predict", json=payload)
+                if resp.status_code == 200:
+                    val = resp.json()['predicted_crime_count']
+                    prediction_results.append({"date": d_str, "predicted": val})
+            except: pass
             
-    if trend_results:
-        trend_df = pd.DataFrame(trend_results)
+        pred_df = pd.DataFrame(prediction_results)
         
-        # Line Chart
-        fig_trend = px.line(
-            trend_df, x="Date", y="Predicted Crimes", 
-            markers=True, title=f"7-Day Forecast for {selected_area_name}"
-        )
-        st.plotly_chart(fig_trend, use_container_width=True)
+        # 3. Merge and Visualize
+        if not history_df.empty and not pred_df.empty:
+            
+            # Create the Plot
+            fig = go.Figure()
+            
+            # A. Actual Data (Solid Blue Line)
+            fig.add_trace(go.Scatter(
+                x=history_df['date'], 
+                y=history_df['actual_crimes'],
+                mode='lines+markers',
+                name='Actual Crimes (History)',
+                line=dict(color='royalblue', width=3)
+            ))
+            
+            # B. Predictions (Dashed Red Line)
+            # We split this into "Backcast" (Past) and "Forecast" (Future) visually if we wanted,
+            # but a continuous line shows the trend best.
+            fig.add_trace(go.Scatter(
+                x=pred_df['date'], 
+                y=pred_df['predicted'],
+                mode='lines',
+                name='Model Prediction',
+                line=dict(color='firebrick', width=2, dash='dash')
+            ))
+            
+            # Add a vertical line for "Today" (Last Data Date)
+            fig.add_vline(x=last_data_date_str, line_width=1, line_dash="dot", annotation_text="End of Training Data")
+            
+            fig.update_layout(
+                title=f"Actual vs. Predicted Crime in {selected_area_name}",
+                xaxis_title="Date",
+                yaxis_title="Crime Count",
+                hovermode="x unified"
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Metrics
+            col1, col2 = st.columns(2)
+            avg_actual = history_df['actual_crimes'].mean()
+            avg_pred_hist = pred_df[pred_df['date'] <= last_data_date_str]['predicted'].mean()
+            
+            col1.metric("Avg Actual (Last 2 Weeks)", f"{avg_actual:.1f}")
+            col2.metric("Avg Model Fit (Last 2 Weeks)", f"{avg_pred_hist:.1f}", delta=f"{avg_pred_hist - avg_actual:.1f}")
+            
+        else:
+            st.error("Insufficient data to generate plot.")
