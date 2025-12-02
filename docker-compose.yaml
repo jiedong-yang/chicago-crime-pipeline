@@ -114,6 +114,7 @@ services:
       - mlflow
     volumes:
       - ./api:/opt/airflow/api
+      - ./data:/opt/airflow/data
 
 volumes:
   postgres-db-volume:
