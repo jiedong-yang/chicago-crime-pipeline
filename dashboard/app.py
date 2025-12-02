@@ -2,17 +2,16 @@ import streamlit as st
 import pandas as pd
 import requests
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
 import json
 
 # --- Configuration ---
-# 1. API URL: 
-#    - Use "http://localhost:8000" for local testing.
-#    - Use "http://YOUR_EC2_IP:8000" when deploying to Streamlit Cloud.
-API_URL = "http://3.137.142.2:8000" 
+# 1. API URL (Use localhost for testing, EC2 IP for production)
+API_URL = "http://localhost:8000" 
 
-# 2. Local Map File (Must be inside your repo)
+# 2. Local Map File
 GEOJSON_PATH = "data/chicago_map.geojson"
 
 # Full Mapping: ID -> Name
@@ -37,69 +36,52 @@ COMMUNITY_AREAS = {
 
 st.set_page_config(page_title="Chicago Crime Radar", layout="wide")
 st.title("🚔 Chicago Crime Radar")
-st.markdown("### AI-Powered Geospatial Forecasting")
+st.markdown("### AI-Powered Time Series Forecasting")
 
 # --- Helper Functions ---
 
 @st.cache_data
 def load_geojson():
-    """Load the map boundaries from local file (Stable & Fast)"""
     if not os.path.exists(GEOJSON_PATH):
-        st.error(f"Map file not found at {GEOJSON_PATH}. Please ensure it is in the 'data' folder.")
+        st.error(f"Map file not found at {GEOJSON_PATH}.")
         return {}
     with open(GEOJSON_PATH, 'r') as f:
         return json.load(f)
 
-@st.cache_data(ttl=3600) # Cache data for 1 hour
+@st.cache_data(ttl=3600) 
 def fetch_stats_from_api():
-    """
-    Hit the Backend API to get the latest available crime stats.
-    This replaces reading the local Parquet file.
-    """
+    """Ask Backend for metadata (latest available data date)"""
     try:
-        # We assume the endpoint is exposed at GET /stats
         response = requests.get(f"{API_URL}/stats")
         if response.status_code == 200:
             return response.json()
-        else:
-            return {"error": f"API Error {response.status_code}: {response.text}"}
+        return None
     except Exception as e:
-        return {"error": f"Connection Error: {e}"}
+        return None
 
 # --- Main Logic ---
 
-# 1. Fetch Static Map Data
+# 1. Fetch Metadata
 chicago_geojson = load_geojson()
-
-# 2. Fetch Dynamic Crime Stats from API
 stats_data = fetch_stats_from_api()
 
-if not stats_data or "error" in stats_data:
-    st.error(f"⚠️ Could not fetch data from Backend API. Ensure the API is running at {API_URL}.")
-    if "error" in stats_data:
-        st.caption(f"Details: {stats_data['error']}")
-    st.stop()
+last_data_date_str = "Unknown"
+if stats_data and "last_date" in stats_data:
+    last_data_date_str = stats_data["last_date"]
 
-# 3. Process API Data
-# JSON keys are always strings, so we convert "1": 5 to 1: 5
-try:
-    latest_counts = {int(k): v for k, v in stats_data.get("counts", {}).items()}
-    last_data_date = stats_data.get("last_date", "Unknown")
-except Exception as e:
-    st.error(f"Error parsing API response: {e}")
-    st.stop()
+# 2. Sidebar Configuration
+st.sidebar.header("Forecast Settings")
+st.sidebar.info(f"Last Training Data: **{last_data_date_str}**")
 
-# 4. Set Targets
-target_date = datetime.now() + timedelta(days=1)
-target_date_str = target_date.strftime("%Y-%m-%d")
+# Date Picker: Default to Tomorrow
+default_date = datetime.now().date() + timedelta(days=1)
+selected_date = st.sidebar.date_input("Target Forecast Date", default_date)
+selected_date_str = selected_date.strftime("%Y-%m-%d")
 
-# 5. Display Header Metrics
-col1, col2 = st.columns([3, 1])
-col1.info(f"📅 **Forecast Target:** {target_date_str}")
-col2.metric("Reference Data Date", str(last_data_date))
+# 3. City-Wide Map Generation
+st.subheader(f"🗺️ City-Wide Forecast: {selected_date_str}")
 
-# 6. Run Predictions Loop
-if st.button("Generate City-Wide Forecast"):
+if st.button("Generate Heatmap"):
     results = []
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -107,21 +89,16 @@ if st.button("Generate City-Wide Forecast"):
     total_areas = 77
     
     for area_id in range(1, total_areas + 1):
-        status_text.text(f"Forecasting for Area {area_id}/{total_areas}...")
+        status_text.text(f"Forecasting {COMMUNITY_AREAS.get(area_id)}...")
         
-        # Get Lag Feature (Yesterday's count)
-        prev_count = float(latest_counts.get(area_id, 0.0))
-        
+        # New Payload: No prev_day_count needed!
         payload = {
             "community_area": area_id,
-            "date": target_date_str,
-            # "prev_day_count": prev_count
+            "date": selected_date_str
         }
         
         try:
-            # Call Prediction Endpoint
             response = requests.post(f"{API_URL}/predict", json=payload)
-            
             if response.status_code == 200:
                 pred = response.json()['predicted_crime_count']
                 area_name = COMMUNITY_AREAS.get(area_id, f"Area {area_id}")
@@ -129,24 +106,20 @@ if st.button("Generate City-Wide Forecast"):
                 results.append({
                     "Area ID": str(area_id), 
                     "Area Name": area_name,
-                    "Predicted Crimes": round(pred, 2),
-                    "Prev Day": int(prev_count)
+                    "Predicted Crimes": round(pred, 2)
                 })
-        except Exception as e:
-            print(f"Error area {area_id}: {e}")
+        except Exception:
+            pass
         
         progress_bar.progress(area_id / total_areas)
     
     status_text.empty()
     progress_bar.empty()
     
-    # --- Visualization ---
     if results:
         results_df = pd.DataFrame(results)
         
-        st.subheader("🗺️ Heatmap: Forecasted Crime Intensity")
-        
-        # Plotly Choropleth Mapbox
+        # Map Visualization
         fig = px.choropleth_mapbox(
             results_df,
             geojson=chicago_geojson,
@@ -154,25 +127,47 @@ if st.button("Generate City-Wide Forecast"):
             featureidkey="properties.area_num_1", 
             color='Predicted Crimes',
             color_continuous_scale="Reds",
-            range_color=(0, results_df['Predicted Crimes'].max()),
             mapbox_style="carto-positron",
             zoom=9.5,
             center = {"lat": 41.83, "lon": -87.68},
             opacity=0.6,
-            hover_name="Area Name",
-            hover_data={"Area ID": True, "Prev Day": True}
+            hover_name="Area Name"
         )
-        
         fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
         st.plotly_chart(fig, use_container_width=True)
+
+# 4. Neighborhood Drill Down (Trend Forecast)
+st.markdown("---")
+st.subheader("📈 Neighborhood Trend Analysis (7-Day Forecast)")
+
+selected_area_name = st.selectbox("Select Neighborhood", list(COMMUNITY_AREAS.values()))
+# Reverse lookup ID from Name
+selected_area_id = [k for k, v in COMMUNITY_AREAS.items() if v == selected_area_name][0]
+
+if st.button(f"Generate Trend for {selected_area_name}"):
+    trend_results = []
+    
+    # Forecast next 7 days starting from selected date
+    for i in range(7):
+        current_date = selected_date + timedelta(days=i)
+        date_str = current_date.strftime("%Y-%m-%d")
         
-        # Data Table
-        with st.expander("View Raw Data"):
-            st.dataframe(
-                results_df[["Area ID", "Area Name", "Predicted Crimes", "Prev Day"]]
-                .sort_values("Predicted Crimes", ascending=False),
-                hide_index=True
-            )
+        payload = {"community_area": selected_area_id, "date": date_str}
+        
+        try:
+            resp = requests.post(f"{API_URL}/predict", json=payload)
+            if resp.status_code == 200:
+                val = resp.json()['predicted_crime_count']
+                trend_results.append({"Date": date_str, "Predicted Crimes": val})
+        except:
+            pass
             
-else:
-    st.write("Click the button above to generate the map.")
+    if trend_results:
+        trend_df = pd.DataFrame(trend_results)
+        
+        # Line Chart
+        fig_trend = px.line(
+            trend_df, x="Date", y="Predicted Crimes", 
+            markers=True, title=f"7-Day Forecast for {selected_area_name}"
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
