@@ -95,6 +95,9 @@ services:
       # to avoid complex Postgres init scripts.
       MLFLOW_BACKEND_STORE_URI: sqlite:////mlflow/mlflow.db
       MLFLOW_DEFAULT_ARTIFACT_ROOT: s3://chicago-crime-pipeline/mlflow-artifacts/
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
     volumes:
       - ./mlruns:/mlflow
       - ~/.aws:/root/.aws:ro
