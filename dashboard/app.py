@@ -115,7 +115,7 @@ if st.button("Generate City-Wide Forecast"):
         payload = {
             "community_area": area_id,
             "date": target_date_str,
-            "prev_day_count": prev_count
+            # "prev_day_count": prev_count
         }
         
         try:
