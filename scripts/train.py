@@ -64,8 +64,8 @@ def get_model_config(area_df):
     }
     # Conservative Volume-Based Tuning
     if avg_daily_volume > 15:
-        config["changepoint_prior_scale"] = 0.2
-        config["seasonality_prior_scale"] = 10.0
+        config["changepoint_prior_scale"] = 0.4
+        config["seasonality_prior_scale"] = 20.0
     elif avg_daily_volume > 5:
         config["changepoint_prior_scale"] = 0.05
         config["seasonality_prior_scale"] = 5.0
