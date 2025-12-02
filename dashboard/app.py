@@ -7,8 +7,12 @@ import os
 import json
 
 # --- Configuration ---
-API_URL = "http://localhost:8000/predict"
-DATA_PATH = "data/raw/crimes.parquet"
+# 1. API URL: 
+#    - Use "http://localhost:8000" for local testing.
+#    - Use "http://YOUR_EC2_IP:8000" when deploying to Streamlit Cloud.
+API_URL = "http://3.137.142.2:8000" 
+
+# 2. Local Map File (Must be inside your repo)
 GEOJSON_PATH = "data/chicago_map.geojson"
 
 # Full Mapping: ID -> Name
@@ -36,45 +40,65 @@ st.title("🚔 Chicago Crime Radar")
 st.markdown("### AI-Powered Geospatial Forecasting")
 
 # --- Helper Functions ---
-@st.cache_data
-def load_data():
-    if not os.path.exists(DATA_PATH):
-        return None
-    return pd.read_parquet(DATA_PATH)
 
 @st.cache_data
 def load_geojson():
+    """Load the map boundaries from local file (Stable & Fast)"""
     if not os.path.exists(GEOJSON_PATH):
-        st.error(f"Map file not found at {GEOJSON_PATH}. Please download it!")
+        st.error(f"Map file not found at {GEOJSON_PATH}. Please ensure it is in the 'data' folder.")
         return {}
     with open(GEOJSON_PATH, 'r') as f:
         return json.load(f)
 
-def get_latest_features(df):
-    df['date'] = pd.to_datetime(df['date'])
-    daily = df.groupby([df['date'].dt.date, 'community_area']).size().reset_index(name='count')
-    last_date = daily['date'].max()
-    latest_counts = daily[daily['date'] == last_date].set_index('community_area')['count'].to_dict()
-    return latest_counts, last_date
+@st.cache_data(ttl=3600) # Cache data for 1 hour
+def fetch_stats_from_api():
+    """
+    Hit the Backend API to get the latest available crime stats.
+    This replaces reading the local Parquet file.
+    """
+    try:
+        # We assume the endpoint is exposed at GET /stats
+        response = requests.get(f"{API_URL}/stats")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"error": f"API Error {response.status_code}: {response.text}"}
+    except Exception as e:
+        return {"error": f"Connection Error: {e}"}
 
 # --- Main Logic ---
-df = load_data()
+
+# 1. Fetch Static Map Data
 chicago_geojson = load_geojson()
 
-if df is None:
-    st.error("Data file not found. Please run the pipeline first!")
+# 2. Fetch Dynamic Crime Stats from API
+stats_data = fetch_stats_from_api()
+
+if not stats_data or "error" in stats_data:
+    st.error(f"⚠️ Could not fetch data from Backend API. Ensure the API is running at {API_URL}.")
+    if "error" in stats_data:
+        st.caption(f"Details: {stats_data['error']}")
     st.stop()
 
-# 1. Prepare Inputs
-latest_counts, last_data_date = get_latest_features(df)
+# 3. Process API Data
+# JSON keys are always strings, so we convert "1": 5 to 1: 5
+try:
+    latest_counts = {int(k): v for k, v in stats_data.get("counts", {}).items()}
+    last_data_date = stats_data.get("last_date", "Unknown")
+except Exception as e:
+    st.error(f"Error parsing API response: {e}")
+    st.stop()
+
+# 4. Set Targets
 target_date = datetime.now() + timedelta(days=1)
 target_date_str = target_date.strftime("%Y-%m-%d")
 
+# 5. Display Header Metrics
 col1, col2 = st.columns([3, 1])
 col1.info(f"📅 **Forecast Target:** {target_date_str}")
 col2.metric("Reference Data Date", str(last_data_date))
 
-# 2. Run Predictions
+# 6. Run Predictions Loop
 if st.button("Generate City-Wide Forecast"):
     results = []
     progress_bar = st.progress(0)
@@ -85,6 +109,7 @@ if st.button("Generate City-Wide Forecast"):
     for area_id in range(1, total_areas + 1):
         status_text.text(f"Forecasting for Area {area_id}/{total_areas}...")
         
+        # Get Lag Feature (Yesterday's count)
         prev_count = float(latest_counts.get(area_id, 0.0))
         
         payload = {
@@ -94,16 +119,16 @@ if st.button("Generate City-Wide Forecast"):
         }
         
         try:
-            response = requests.post(API_URL, json=payload)
+            # Call Prediction Endpoint
+            response = requests.post(f"{API_URL}/predict", json=payload)
+            
             if response.status_code == 200:
                 pred = response.json()['predicted_crime_count']
-                
-                # Retrieve Name from Dictionary
                 area_name = COMMUNITY_AREAS.get(area_id, f"Area {area_id}")
                 
                 results.append({
                     "Area ID": str(area_id), 
-                    "Area Name": area_name,  # <--- Added Name Here
+                    "Area Name": area_name,
                     "Predicted Crimes": round(pred, 2),
                     "Prev Day": int(prev_count)
                 })
@@ -125,7 +150,7 @@ if st.button("Generate City-Wide Forecast"):
         fig = px.choropleth_mapbox(
             results_df,
             geojson=chicago_geojson,
-            locations='Area ID',             # Match the ID column
+            locations='Area ID',
             featureidkey="properties.area_num_1", 
             color='Predicted Crimes',
             color_continuous_scale="Reds",
@@ -134,15 +159,15 @@ if st.button("Generate City-Wide Forecast"):
             zoom=9.5,
             center = {"lat": 41.83, "lon": -87.68},
             opacity=0.6,
-            hover_name="Area Name",          # <--- Hover now shows "Loop", "Lincoln Park", etc.
+            hover_name="Area Name",
             hover_data={"Area ID": True, "Prev Day": True}
         )
         
         fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
         st.plotly_chart(fig, use_container_width=True)
         
+        # Data Table
         with st.expander("View Raw Data"):
-            # Reorder columns for better readability
             st.dataframe(
                 results_df[["Area ID", "Area Name", "Predicted Crimes", "Prev Day"]]
                 .sort_values("Predicted Crimes", ascending=False),
