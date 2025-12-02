@@ -13,37 +13,111 @@ import joblib
 # Configuration
 remote_server_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5001")
 mlflow.set_tracking_uri(remote_server_uri)
+# Fix Matplotlib permission issue in Docker
 os.environ['MPLCONFIGDIR'] = '/tmp'
 
-# ... (ChicagoProphetModel Class stays the same) ...
+# ---------------------------------------------------------
+# 1. Define the Custom MLflow Model Wrapper
+# ---------------------------------------------------------
 class ChicagoProphetModel(mlflow.pyfunc.PythonModel):
+    """
+    A custom MLflow model that holds a dictionary of Prophet models.
+    One model per Community Area.
+    """
     def load_context(self, context):
+        # Load the dictionary of models from the artifact path
         self.models = joblib.load(context.artifacts["prophet_models"])
+
     def predict(self, context, model_input):
+        """
+        Input schema: DataFrame with columns ['community_area', 'date']
+        """
         predictions = []
+        
+        # We loop through the input rows (usually just 1 for API)
         for _, row in model_input.iterrows():
             area = int(row['community_area'])
             date = pd.to_datetime(row['date'])
+            
+            # 1. Select the correct model
             model = self.models.get(area)
+            
             if model is None:
+                # Fallback if area unknown
                 predictions.append(0.0)
                 continue
+                
+            # 2. Create Future DataFrame for Prophet
             future = pd.DataFrame({'ds': [date]})
+            
+            # 3. Forecast
             forecast = model.predict(future)
-            predictions.append(max(0.0, forecast['yhat'].values[0]))
+            pred_value = forecast['yhat'].values[0]
+            
+            # Prophet can output negative numbers, clamp to 0
+            predictions.append(max(0.0, pred_value))
+            
         return predictions
 
-# ... (load_and_prep_data stays the same) ...
+# ---------------------------------------------------------
+# 2. Data Preparation
+# ---------------------------------------------------------
 def load_and_prep_data(path):
     df = pd.read_parquet(path)
     df['date'] = pd.to_datetime(df['date'])
+    
+    # Explicitly create a column for daily grouping
     df['date_day'] = df['date'].dt.date
+    
+    # Aggregate to Daily Counts: ['date_day', 'community_area', 'y']
     daily = df.groupby(['date_day', 'community_area']).size().reset_index(name='y')
+    
+    # Rename 'date_day' to 'ds' for Prophet
     daily.rename(columns={'date_day': 'ds'}, inplace=True)
+    
     daily['ds'] = pd.to_datetime(daily['ds'])
     return daily
 
+# ---------------------------------------------------------
+# 3. Dynamic Tuning Logic (Strategy 2)
+# ---------------------------------------------------------
+def get_model_config(area_df):
+    """
+    Returns specific Prophet parameters based on the area's data characteristics.
+    """
+    avg_daily_volume = area_df['y'].mean()
+    
+    # Base Config
+    config = {
+        "daily_seasonality": False, # We aggregated to daily, so no hourly data
+        "weekly_seasonality": True, # Critical for crime (Fri/Sat peaks)
+        "yearly_seasonality": True, # Critical for weather (Summer vs Winter)
+    }
+    
+    # Volume-Based Tuning
+    if avg_daily_volume > 15:
+        # High Crime Area (e.g., Austin): Needs flexibility for spikes
+        config["changepoint_prior_scale"] = 0.5
+        config["seasonality_prior_scale"] = 10.0
+    elif avg_daily_volume > 5:
+        # Medium Crime Area
+        config["changepoint_prior_scale"] = 0.1
+        config["seasonality_prior_scale"] = 5.0
+    else:
+        # Low Crime Area (e.g., Edison Park): Needs stiffness to avoid overfitting noise
+        config["changepoint_prior_scale"] = 0.01
+        config["seasonality_prior_scale"] = 0.1
+        
+    return config
+
+# ---------------------------------------------------------
+# 4. Backtesting Logic
+# ---------------------------------------------------------
 def run_backtest(df, areas, n_folds=3, test_days=28):
+    """
+    Performs Rolling Window Backtesting.
+    Returns global metrics and a DataFrame of per-area metrics.
+    """
     print(f"--- Starting {n_folds}-Fold Backtest (Window: {test_days} days) ---")
     
     max_date = df['ds'].max()
@@ -56,18 +130,24 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
         fold_start = fold_end - pd.Timedelta(days=test_days)
         train_cutoff = fold_start 
         
-        print(f"Fold {i+1}: Test {fold_start.date()} to {fold_end.date()}")
+        print(f"Fold {i+1}: Train up to {train_cutoff.date()} -> Test {fold_start.date()} to {fold_end.date()}")
         
+        # Split Data
         train_df = df[df['ds'] <= train_cutoff]
         test_df = df[(df['ds'] > fold_start) & (df['ds'] <= fold_end)]
         
-        if test_df.empty: continue
+        if test_df.empty:
+            print("Skipping fold (not enough data)")
+            continue
             
         for area in areas:
             area_train = train_df[train_df['community_area'] == area].copy()
             if len(area_train) < 30: continue 
             
-            m = Prophet(daily_seasonality=True, yearly_seasonality=True)
+            # Apply Dynamic Tuning for Backtest
+            params = get_model_config(area_train)
+            m = Prophet(**params)
+            m.add_country_holidays(country_name='US')
             m.fit(area_train)
             
             area_test = test_df[test_df['community_area'] == area].copy()
@@ -76,7 +156,6 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
                 preds = np.maximum(0, forecast['yhat'].values)
                 actuals = area_test['y'].values
                 
-                # Append to specific area results
                 area_results[area]['true'].extend(actuals)
                 area_results[area]['pred'].extend(preds)
     
@@ -92,7 +171,7 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
     global_rmse = np.sqrt(mean_squared_error(all_true, all_pred)) if all_true else 0.0
     global_mae = mean_absolute_error(all_true, all_pred) if all_true else 0.0
     
-    print(f"Global RMSE: {global_rmse:.4f}")
+    print(f"Global Backtest RMSE: {global_rmse:.4f}")
     
     # 2. Per-Area Metrics
     area_metrics = []
@@ -103,60 +182,90 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
         if y_true:
             rmse = np.sqrt(mean_squared_error(y_true, y_pred))
             mae = mean_absolute_error(y_true, y_pred)
-            area_metrics.append({"community_area": area, "rmse": rmse, "mae": mae})
+            area_metrics.append({"community_area": int(area), "rmse": rmse, "mae": mae})
             
     metrics_df = pd.DataFrame(area_metrics)
     
     return global_rmse, global_mae, metrics_df
 
+# ---------------------------------------------------------
+# 5. Main Training Loop
+# ---------------------------------------------------------
 def train_prophet_models(data_path):
     print(f"Loading data from {data_path}...")
     df = load_and_prep_data(data_path)
     areas = df['community_area'].unique()
     
-    # Run Backtest
+    # --- Step 1: Run Backtest (Validation) ---
     val_rmse, val_mae, metrics_df = run_backtest(df, areas, n_folds=3, test_days=28)
     
     # Identify Worst Performing Area
-    worst_area = metrics_df.loc[metrics_df['rmse'].idxmax()]
-    print(f"Worst Area: {worst_area['community_area']} (RMSE: {worst_area['rmse']:.2f})")
+    if not metrics_df.empty:
+        worst_area = metrics_df.loc[metrics_df['rmse'].idxmax()]
+        print(f"Worst Area: {worst_area['community_area']} (RMSE: {worst_area['rmse']:.2f})")
+    else:
+        worst_area = {'rmse': 0.0}
     
-    # Train Production Models
-    print("--- Training Final Production Models ---")
+    # --- Step 2: Train Final Production Models ---
+    print("--- Training Final Production Models on Full History ---")
     area_models = {}
+    tuning_logs = []
+    
     for area in areas:
         area_df = df[df['community_area'] == area].copy()
-        m = Prophet(daily_seasonality=True, yearly_seasonality=True)
+        
+        # Get dynamic config
+        params = get_model_config(area_df)
+        
+        # Initialize Prophet with Holidays
+        m = Prophet(**params)
+        m.add_country_holidays(country_name='US')
         m.fit(area_df)
+        
         area_models[int(area)] = m
+        
+        tuning_logs.append({
+            "area": int(area),
+            "avg_vol": area_df['y'].mean(),
+            "scale": params["changepoint_prior_scale"]
+        })
     
-    # MLflow Logging
+    # --- Step 3: MLflow Logging ---
     experiment_name = "Chicago_Crime_Prophet"
     mlflow.set_experiment(experiment_name)
     
     with mlflow.start_run() as run:
         
+        # Log Params
         mlflow.log_params({
             "model_type": "Prophet",
             "n_areas": len(areas),
-            "evaluation_method": "3-Fold Rolling Window"
+            "evaluation_method": "3-Fold Rolling Window",
+            "tuning_strategy": "Volume-Based",
+            "holidays_enabled": True
         })
         
-        # Log Global Metrics
+        # Log Metrics
         mlflow.log_metrics({
             "rmse_global": val_rmse,
             "mae_global": val_mae,
             "rmse_worst_area": worst_area['rmse']
         })
         
-        # Log Per-Area Metrics as CSV Artifact (The "Drill Down")
-        metrics_df.to_csv("area_metrics.csv", index=False)
-        mlflow.log_artifact("area_metrics.csv")
+        # Log Artifacts (CSV Reports)
+        if not metrics_df.empty:
+            metrics_df.to_csv("area_metrics.csv", index=False)
+            mlflow.log_artifact("area_metrics.csv")
+            
+        tuning_df = pd.DataFrame(tuning_logs)
+        tuning_df.to_csv("tuning_config.csv", index=False)
+        mlflow.log_artifact("tuning_config.csv")
         
-        # Standard Logging...
+        # Log Dataset
         dataset = mlflow.data.from_pandas(df, name="chicago_crime_aggregated", targets="y")
         mlflow.log_input(dataset, context="training")
         
+        # Log Model
         model_dict_path = "prophet_models.pkl"
         joblib.dump(area_models, model_dict_path)
         
@@ -167,6 +276,7 @@ def train_prophet_models(data_path):
             registered_model_name="ChicagoCrimePredictor"
         )
         
+        # Auto-Promote
         client = MlflowClient()
         latest_version = client.get_latest_versions("ChicagoCrimePredictor", stages=["None"])[0].version
         client.transition_model_version_stage(
@@ -175,9 +285,11 @@ def train_prophet_models(data_path):
             stage="Production",
             archive_existing_versions=True
         )
+        print("Model promoted to Production.")
         
-        if os.path.exists(model_dict_path): os.remove(model_dict_path)
-        if os.path.exists("area_metrics.csv"): os.remove("area_metrics.csv")
+        # Cleanup
+        for f in [model_dict_path, "area_metrics.csv", "tuning_config.csv"]:
+            if os.path.exists(f): os.remove(f)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
