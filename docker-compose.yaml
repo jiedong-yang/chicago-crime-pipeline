@@ -99,6 +99,19 @@ services:
       - ./mlruns:/mlflow
       - ~/.aws:/root/.aws:ro
     command: mlflow server --backend-store-uri sqlite:////mlflow/mlflow.db --default-artifact-root s3://chicago-crime-pipeline/mlflow-artifacts/ --host 0.0.0.0
+  
+  api:
+    build: .
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+    depends_on:
+      - mlflow
 
 volumes:
   postgres-db-volume:
