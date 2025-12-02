@@ -19,16 +19,13 @@ def ingest_data(lookback_days: int, output_path: str):
     # Calculate date threshold
     start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%dT%H:%M:%S.000')
     
-    # SoQL Query (Socrata Query Language)
-    # 1. Filter by date
-    # 2. Limit to Primary Type = 'THEFT' or 'BATTERY' to keep data manageable? 
-    #    Let's grab everything but limit columns to save space.
-    print(f"Fetching data since {start_date}...")
+    print(f"Fetching data since {start_date} (Newest First)...")
     
     results = client.get(
         DATASET_ID,
         where=f"date > '{start_date}'",
-        limit=500000,  # Safety limit, increase if downloading massive history
+        order="date DESC", # <--- CRITICAL FIX: Prioritize newest data
+        limit=500000,      # 500k is enough for ~2 years of data
         select="date, block, primary_type, description, location_description, community_area, latitude, longitude"
     )
 
@@ -50,10 +47,11 @@ def ingest_data(lookback_days: int, output_path: str):
     # Save
     df.to_parquet(output_path, index=False)
     print(f"Success! Saved {len(df)} rows to {output_path}")
+    print(f"Date Range: {df['date'].min()} to {df['date'].max()}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=730, help="How many days of history to fetch")
+    parser.add_argument("--days", type=int, default=365, help="How many days of history to fetch")
     parser.add_argument("--output", type=str, default="data/raw/crimes.parquet", help="Output path")
     args = parser.parse_args()
     
