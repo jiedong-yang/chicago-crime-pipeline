@@ -164,7 +164,7 @@ if st.button("Generate Heatmap"):
 st.markdown("---")
 st.subheader("📈 Deep Dive: Model Performance & Forecast")
 
-selected_area_name = st.selectbox("Select Neighborhood", [f"{i+1}: {area}" for i, area in enumerate(list(COMMUNITY_AREAS.values()))], index=7) # Default to Near North Side
+selected_area_name = st.selectbox("Select Neighborhood", [f"{k}: {v}" for k, v in COMMUNITY_AREAS.items()], index=7) # Default to Near North Side
 selected_area_id = [k for k, v in COMMUNITY_AREAS.items() if v == selected_area_name][0]
 
 if st.button(f"Analyze {selected_area_name}"):
