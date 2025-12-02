@@ -14,3 +14,5 @@ sodapy==2.2.0
 streamlit==1.51.0
 uvicorn==0.38.0
 cffi==1.17.1
+prophet
+joblib
