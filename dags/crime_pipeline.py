@@ -35,7 +35,7 @@ with DAG(
             'AWS_SECRET_ACCESS_KEY': os.getenv('AWS_SECRET_ACCESS_KEY'),
             'AWS_DEFAULT_REGION': os.getenv('AWS_DEFAULT_REGION', 'us-east-1'),
         }, 
-        bash_command='python /opt/airflow/scripts/train.py --data /opt/airflow/data/raw/crimes.parquet --n_estimators 100'
+        bash_command='python /opt/airflow/scripts/train.py --data /opt/airflow/data/raw/crimes.parquet'
     )
 
     # NEW TASK: Trigger API Refresh
