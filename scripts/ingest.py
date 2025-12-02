@@ -28,7 +28,7 @@ def ingest_data(lookback_days: int, output_path: str):
     results = client.get(
         DATASET_ID,
         where=f"date > '{start_date}'",
-        limit=50000,  # Safety limit, increase if downloading massive history
+        limit=500000,  # Safety limit, increase if downloading massive history
         select="date, block, primary_type, description, location_description, community_area, latitude, longitude"
     )
 
@@ -53,7 +53,7 @@ def ingest_data(lookback_days: int, output_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=90, help="How many days of history to fetch")
+    parser.add_argument("--days", type=int, default=730, help="How many days of history to fetch")
     parser.add_argument("--output", type=str, default="data/raw/crimes.parquet", help="Output path")
     args = parser.parse_args()
     

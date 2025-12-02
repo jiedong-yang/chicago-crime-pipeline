@@ -24,7 +24,7 @@ with DAG(
 
     ingest_task = BashOperator(
         task_id='ingest_data',
-        bash_command='python /opt/airflow/scripts/ingest.py --days 1000 --output /opt/airflow/data/raw/crimes.parquet'
+        bash_command='python /opt/airflow/scripts/ingest.py --days 740 --output /opt/airflow/data/raw/crimes.parquet'
     )
 
     train_task = BashOperator(
