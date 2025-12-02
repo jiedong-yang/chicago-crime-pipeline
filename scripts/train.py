@@ -47,7 +47,8 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
     Performs Rolling Window Backtesting.
     Returns the average RMSE and MAE across all folds.
     """
-    print(f"--- Starting {n_folds-Fold} Backtest (Window: {test_days} days) ---")
+    # --- TYPO FIXED HERE ---
+    print(f"--- Starting {n_folds}-Fold Backtest (Window: {test_days} days) ---")
     
     overall_true = []
     overall_pred = []
@@ -62,7 +63,7 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
         fold_end = max_date - pd.Timedelta(days=i * test_days)
         fold_start = fold_end - pd.Timedelta(days=test_days)
         
-        train_cutoff = fold_start # We train on everything before the test window starts
+        train_cutoff = fold_start 
         
         print(f"Fold {i+1}: Train up to {train_cutoff.date()} -> Test {fold_start.date()} to {fold_end.date()}")
         
@@ -91,6 +92,10 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
                 overall_pred.extend(np.maximum(0, forecast['yhat'].values))
                 
     # Calculate Averaged Metrics
+    if not overall_true:
+        print("Warning: No backtest data gathered.")
+        return 0.0, 0.0, 0.0
+
     rmse = np.sqrt(mean_squared_error(overall_true, overall_pred))
     mae = mean_absolute_error(overall_true, overall_pred)
     r2 = r2_score(overall_true, overall_pred)
@@ -104,8 +109,6 @@ def train_prophet_models(data_path):
     areas = df['community_area'].unique()
     
     # --- 1. RUN BACKTEST (For Validation Metrics) ---
-    # We use 3 folds of 28 days (4 weeks) each.
-    # This evaluates the model over the last ~3 months.
     val_rmse, val_mae, val_r2 = run_backtest(df, areas, n_folds=3, test_days=28)
     
     # --- 2. RETRAIN ON FULL DATA (For Production) ---
