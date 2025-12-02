@@ -1,0 +1,4 @@
+FROM ghcr.io/mlflow/mlflow:v2.7.1
+
+# Install AWS dependencies
+RUN pip install boto3 cryptography
