@@ -1,126 +1,146 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
+from prophet import Prophet
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import mlflow
-import mlflow.sklearn
+import mlflow.pyfunc
 from mlflow.tracking import MlflowClient
 import argparse
 import os
+import joblib
 
-# Set MLflow Tracking URI
-# If running locally, point to localhost:5001
-# If running in Docker, it uses the Env Var http://mlflow:5000
+# Configuration
 remote_server_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5001")
 mlflow.set_tracking_uri(remote_server_uri)
 
-def load_data(path):
+# ---------------------------------------------------------
+# 1. Define the Custom MLflow Model Wrapper
+# ---------------------------------------------------------
+class ChicagoProphetModel(mlflow.pyfunc.PythonModel):
+    """
+    A custom MLflow model that holds a dictionary of Prophet models.
+    One model per Community Area.
+    """
+    def load_context(self, context):
+        # Load the dictionary of models from the artifact path
+        self.models = joblib.load(context.artifacts["prophet_models"])
+
+    def predict(self, context, model_input):
+        """
+        Input schema: DataFrame with columns ['community_area', 'date']
+        """
+        predictions = []
+        
+        # We loop through the input rows (usually just 1 for API)
+        for _, row in model_input.iterrows():
+            area = int(row['community_area'])
+            date = pd.to_datetime(row['date'])
+            
+            # 1. Select the correct model
+            model = self.models.get(area)
+            
+            if model is None:
+                # Fallback if area unknown
+                predictions.append(0.0)
+                continue
+                
+            # 2. Create Future DataFrame for Prophet
+            future = pd.DataFrame({'ds': [date]})
+            
+            # 3. Forecast
+            forecast = model.predict(future)
+            pred_value = forecast['yhat'].values[0]
+            
+            # Prophet can output negative numbers, clamp to 0
+            predictions.append(max(0.0, pred_value))
+            
+        return predictions
+
+# ---------------------------------------------------------
+# 2. Training Logic
+# ---------------------------------------------------------
+def load_and_prep_data(path):
     df = pd.read_parquet(path)
-    # Ensure date is datetime
     df['date'] = pd.to_datetime(df['date'])
-    # Normalize to just the 'Date' (remove time) for daily aggregation
-    df['date_day'] = df['date'].dt.date
-    return df
+    # Aggregate to Daily Counts
+    daily = df.groupby([df['date'].dt.date, 'community_area']).size().reset_index(name='y')
+    daily.rename(columns={'level_0': 'ds'}, inplace=True) # Prophet needs 'ds' and 'y'
+    daily['ds'] = pd.to_datetime(daily['ds'])
+    return daily
 
-def feature_engineering(df):
-    """
-    Convert raw crime logs into daily counts per community area.
-    """
-    # Aggregate: Count crimes per Day per Area
-    daily_counts = df.groupby(['date_day', 'community_area']).size().reset_index(name='crime_count')
-    daily_counts['date_day'] = pd.to_datetime(daily_counts['date_day'])
-
-    # Create Features
-    daily_counts['day_of_week'] = daily_counts['date_day'].dt.dayofweek
-    daily_counts['month'] = daily_counts['date_day'].dt.month
-    daily_counts['day_of_year'] = daily_counts['date_day'].dt.dayofyear
-    
-    # Lag Features (What happened yesterday?)
-    daily_counts = daily_counts.sort_values(['community_area', 'date_day'])
-    daily_counts['prev_day_count'] = daily_counts.groupby('community_area')['crime_count'].shift(1)
-    
-    # Drop NAs created by lag
-    daily_counts.dropna(inplace=True)
-    
-    return daily_counts
-
-def train_model(data_path, n_estimators, max_depth):
+def train_prophet_models(data_path):
     print(f"Loading data from {data_path}...")
-    df = load_data(data_path)
+    df = load_and_prep_data(data_path)
     
-    print("Feature Engineering...")
-    df_processed = feature_engineering(df)
+    # Dictionary to store our 77 models
+    # { 1: ProphetModel, 2: ProphetModel ... }
+    area_models = {}
     
-    # Split Data (Time-based split, not random!)
-    split_date = df_processed['date_day'].max() - pd.Timedelta(days=14) # Last 2 weeks for test
+    # Get list of all areas
+    areas = df['community_area'].unique()
+    print(f"Training Prophet models for {len(areas)} areas...")
     
-    train = df_processed[df_processed['date_day'] < split_date]
-    test = df_processed[df_processed['date_day'] >= split_date]
+    # Metrics tracking
+    total_rmse = 0
     
-    features = ['community_area', 'day_of_week', 'month', 'day_of_year', 'prev_day_count']
-    target = 'crime_count'
+    for area in areas:
+        # 1. Filter Data for this Area
+        area_df = df[df['community_area'] == area].copy()
+        
+        # 2. Train Prophet
+        # Using daily seasonality. 
+        m = Prophet(daily_seasonality=True, yearly_seasonality=True)
+        m.fit(area_df)
+        
+        area_models[int(area)] = m
+        
+        # (Optional) Quick In-Sample Evaluation
+        # In a real project, we would split Train/Test here to calculate RMSE
     
-    X_train, y_train = train[features], train[target]
-    X_test, y_test = test[features], test[target]
+    print("Training complete.")
     
-    # Start MLflow Run
-    experiment_name = "Chicago_Crime_Prediction_S3"
+    # ---------------------------------------------------------
+    # 3. Logging to MLflow
+    # ---------------------------------------------------------
+    experiment_name = "Chicago_Crime_Prophet"
     mlflow.set_experiment(experiment_name)
-
-    # Debug info
-    experiment = mlflow.get_experiment_by_name(experiment_name)
-    print(f"DEBUG: Artifact Location is: {experiment.artifact_location}")
     
-    # CAPTURE THE RUN OBJECT HERE using 'as run'
     with mlflow.start_run() as run:
-        print(f"Training Random Forest (n_est={n_estimators})...")
-        rf = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
-        rf.fit(X_train, y_train)
+        # Save the dictionary of models to a local file first
+        model_dict_path = "prophet_models.pkl"
+        joblib.dump(area_models, model_dict_path)
         
-        # Evaluate
-        predictions = rf.predict(X_test)
-        rmse = np.sqrt(mean_squared_error(y_test, predictions))
-        mae = mean_absolute_error(y_test, predictions)
+        # Log the Custom Model
+        # We assume the environment is handled by Docker, so we skip conda_env for speed here
+        mlflow.pyfunc.log_model(
+            artifact_path="model",
+            python_model=ChicagoProphetModel(),
+            artifacts={"prophet_models": model_dict_path},
+            registered_model_name="ChicagoCrimePredictor"
+        )
+        print("Mega-Model logged and registered.")
         
-        print(f"RMSE: {rmse:.2f}")
-        print(f"MAE: {mae:.2f}")
-        
-        # Log Params & Metrics
-        mlflow.log_param("n_estimators", n_estimators)
-        mlflow.log_param("max_depth", max_depth)
-        mlflow.log_metric("rmse", rmse)
-        mlflow.log_metric("mae", mae)
-        
-        # 1. Log Model to Artifact Store (S3)
-        mlflow.sklearn.log_model(rf, "model")
-        print("Model artifacts logged to S3.")
-
-        # ---------------------------------------------------------
-        # NEW: AUTOMATIC REGISTRATION & PROMOTION
-        # ---------------------------------------------------------
-        model_name = "ChicagoCrimePredictor"
-        model_uri = f"runs:/{run.info.run_id}/model"
-        
-        # 2. Register Model
-        print(f"Registering model: {model_name}...")
-        model_details = mlflow.register_model(model_uri, model_name)
-        
-        # 3. Promote to Production
-        # This moves the previous 'Production' model to 'Archived' automatically
+        # Transition to Production
         client = MlflowClient()
+        latest_version = client.get_latest_versions("ChicagoCrimePredictor", stages=["None"])[0].version
         client.transition_model_version_stage(
-            name=model_name,
-            version=model_details.version,
+            name="ChicagoCrimePredictor",
+            version=latest_version,
             stage="Production",
             archive_existing_versions=True
         )
-        print(f"✅ Model Version {model_details.version} promoted to PRODUCTION.")
+        print("Promoted to Production.")
+        
+        # Cleanup local file
+        if os.path.exists(model_dict_path):
+            os.remove(model_dict_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default="data/raw/crimes.parquet")
-    parser.add_argument("--n_estimators", type=int, default=100)
+    # We ignore n_estimators/max_depth as they don't apply to Prophet
+    parser.add_argument("--n_estimators", type=int, default=100) 
     parser.add_argument("--max_depth", type=int, default=10)
     args = parser.parse_args()
     
-    train_model(args.data, args.n_estimators, args.max_depth)
+    train_prophet_models(args.data)
