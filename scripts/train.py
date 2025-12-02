@@ -55,23 +55,43 @@ def load_and_prep_data(path):
 # ---------------------------------------------------------
 # 3. Dynamic Tuning (Strategy 2)
 # ---------------------------------------------------------
-def get_model_config(area_df):
+def get_model_config(area_df, area_id):
+    """
+    Returns specific Prophet parameters.
+    Updated based on Error Analysis from Dec 2025.
+    """
     avg_daily_volume = area_df['y'].mean()
+    
+    # Base Config
     config = {
         "daily_seasonality": False,
         "weekly_seasonality": True,
         "yearly_seasonality": True,
     }
-    # Conservative Volume-Based Tuning
-    if avg_daily_volume > 15:
-        config["changepoint_prior_scale"] = 0.4
+
+    # --- LIST OF PROBLEM AREAS (High Variance) ---
+    # Derived from area_metrics.csv
+    # 28: Near West Side, 25: Austin, 8: Near North, 32: Loop, 71: Auburn Gresham
+    high_volatility_zones = [28, 25, 8, 32, 71, 24, 43, 68]
+
+    if area_id in high_volatility_zones:
+        # AGGRESSIVE TUNING
+        # These areas spike hard. We need the model to be very flexible.
+        # changepoint_prior_scale 0.5 -> Allow trend to change quickly
+        # seasonality_prior_scale 20.0 -> Allow strong weekly patterns (Fri/Sat spikes)
+        config["changepoint_prior_scale"] = 0.5
         config["seasonality_prior_scale"] = 20.0
+        
     elif avg_daily_volume > 5:
+        # Standard Tuning for medium areas
         config["changepoint_prior_scale"] = 0.05
-        config["seasonality_prior_scale"] = 5.0
+        config["seasonality_prior_scale"] = 10.0
+        
     else:
-        config["changepoint_prior_scale"] = 0.03
-        config["seasonality_prior_scale"] = 1.0
+        # Stiff Tuning for quiet areas to avoid overfitting noise
+        config["changepoint_prior_scale"] = 0.01
+        config["seasonality_prior_scale"] = 0.1
+        
     return config
 
 # ---------------------------------------------------------
@@ -105,7 +125,7 @@ def run_backtest(df, areas, n_folds=3, test_days=28):
             if len(area_train) < 30: continue 
             
             # Apply Tuning
-            params = get_model_config(area_train)
+            params = get_model_config(area_train, int(area))
             m = Prophet(**params)
             m.add_country_holidays(country_name='US')
             m.fit(area_train)
@@ -181,7 +201,7 @@ def train_prophet_models(data_path):
     
     for area in areas:
         area_df = df[df['community_area'] == area].copy()
-        params = get_model_config(area_df)
+        params = get_model_config(area_df, int(area))
         m = Prophet(**params)
         m.add_country_holidays(country_name='US')
         m.fit(area_df)
