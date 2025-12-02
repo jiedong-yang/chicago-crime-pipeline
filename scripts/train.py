@@ -13,6 +13,9 @@ import joblib
 remote_server_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5001")
 mlflow.set_tracking_uri(remote_server_uri)
 
+# Set Matplotlib config to tmp to avoid permission errors in Docker
+os.environ['MPLCONFIGDIR'] = '/tmp'
+
 # ---------------------------------------------------------
 # 1. Define the Custom MLflow Model Wrapper
 # ---------------------------------------------------------
@@ -62,9 +65,17 @@ class ChicagoProphetModel(mlflow.pyfunc.PythonModel):
 def load_and_prep_data(path):
     df = pd.read_parquet(path)
     df['date'] = pd.to_datetime(df['date'])
+    
+    # FIX: Explicitly create a column for daily grouping to avoid Naming confusion
+    df['date_day'] = df['date'].dt.date
+    
     # Aggregate to Daily Counts
-    daily = df.groupby([df['date'].dt.date, 'community_area']).size().reset_index(name='y')
-    daily.rename(columns={'level_0': 'ds'}, inplace=True) # Prophet needs 'ds' and 'y'
+    # resulting columns: ['date_day', 'community_area', 'y']
+    daily = df.groupby(['date_day', 'community_area']).size().reset_index(name='y')
+    
+    # Rename 'date_day' to 'ds' for Prophet
+    daily.rename(columns={'date_day': 'ds'}, inplace=True)
+    
     daily['ds'] = pd.to_datetime(daily['ds'])
     return daily
 
@@ -80,9 +91,6 @@ def train_prophet_models(data_path):
     areas = df['community_area'].unique()
     print(f"Training Prophet models for {len(areas)} areas...")
     
-    # Metrics tracking
-    total_rmse = 0
-    
     for area in areas:
         # 1. Filter Data for this Area
         area_df = df[df['community_area'] == area].copy()
@@ -93,9 +101,6 @@ def train_prophet_models(data_path):
         m.fit(area_df)
         
         area_models[int(area)] = m
-        
-        # (Optional) Quick In-Sample Evaluation
-        # In a real project, we would split Train/Test here to calculate RMSE
     
     print("Training complete.")
     
@@ -111,7 +116,6 @@ def train_prophet_models(data_path):
         joblib.dump(area_models, model_dict_path)
         
         # Log the Custom Model
-        # We assume the environment is handled by Docker, so we skip conda_env for speed here
         mlflow.pyfunc.log_model(
             artifact_path="model",
             python_model=ChicagoProphetModel(),
@@ -138,7 +142,6 @@ def train_prophet_models(data_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default="data/raw/crimes.parquet")
-    # We ignore n_estimators/max_depth as they don't apply to Prophet
     parser.add_argument("--n_estimators", type=int, default=100) 
     parser.add_argument("--max_depth", type=int, default=10)
     args = parser.parse_args()
