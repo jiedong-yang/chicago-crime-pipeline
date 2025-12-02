@@ -6,6 +6,8 @@ import os
 import uvicorn
 from contextlib import asynccontextmanager
 
+DATA_PATH = "/opt/airflow/data/raw/crimes.parquet"
+
 # ---------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------
@@ -49,6 +51,35 @@ class CrimeInput(BaseModel):
     community_area: int
     date: str  # Format: YYYY-MM-DD
     prev_day_count: float
+
+@app.get("/stats")
+def get_latest_stats():
+    """
+    Returns the latest date and crime counts for all areas.
+    Used by the Frontend to populate inputs.
+    """
+    if not os.path.exists(DATA_PATH):
+        return {"error": "Data not found. Pipeline has not run yet."}
+    
+    try:
+        df = pd.read_parquet(DATA_PATH)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Group by Date and Area
+        daily = df.groupby([df['date'].dt.date, 'community_area']).size().reset_index(name='count')
+        
+        # Get the absolute latest date in the dataset
+        last_date = daily['date'].max()
+        
+        # Filter for that date and convert to Dict {area_id: count}
+        latest_counts = daily[daily['date'] == last_date].set_index('community_area')['count'].to_dict()
+        
+        return {
+            "last_date": str(last_date),
+            "counts": latest_counts
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/predict")
 def predict(input_data: CrimeInput):
